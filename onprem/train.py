@@ -94,8 +94,8 @@ class CISPOLoss(torch.nn.Module):
         labels: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        logits = torch.clamp(logits, min=-30, max=30)
         probs = F.softmax(logits, dim=-1)
-        probs = torch.clamp(probs, min=1e-9, max=1.0 - 1e-9)
         target_probs = probs.gather(-1, labels.unsqueeze(-1)).squeeze(-1)
 
         clipped_probs = torch.clamp(target_probs, self.clip_low, self.clip_high)
@@ -103,7 +103,7 @@ class CISPOLoss(torch.nn.Module):
 
         mask = (target_probs > self.clip_low).float()
 
-        entropy = -(probs * torch.log(probs)).sum(-1)
+        entropy = -(probs * torch.log(probs + 1e-12)).sum(-1)
         entropy_bonus = self.beta * entropy
 
         loss = nll * mask - entropy_bonus
