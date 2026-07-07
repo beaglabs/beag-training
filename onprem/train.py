@@ -23,7 +23,15 @@ from torch.utils.data import DataLoader, Dataset
 
 
 class LabeledDataset(Dataset):
-    """Dataset for on-prem training. Reads from JSONL or in-memory list."""
+    """Dataset for on-prem training. Reads from JSONL or in-memory list.
+
+    Supports two formats:
+    1. Messages (instruction pairs): records with "messages" key containing
+       [{"role":"system",...}, {"role":"user",...}, {"role":"assistant",...}].
+       Loss is masked to only compute on assistant tokens.
+    2. Plain text: records with a text field (e.g. "text" key).
+       Loss is computed on all tokens (next-token prediction).
+    """
 
     def __init__(
         self,
@@ -44,6 +52,13 @@ class LabeledDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict:
         record = self.records[idx]
+
+        # Instruction format with loss masking
+        messages = record.get("messages")
+        if messages:
+            return self._tokenize_instruction(messages, record)
+
+        # Legacy plain text format
         text = record.get(self.text_field, "")
         if isinstance(text, dict):
             text = text.get("text", str(text))
@@ -62,6 +77,71 @@ class LabeledDataset(Dataset):
         return {
             "input_ids": tokens["input_ids"].squeeze(0),
             "attention_mask": tokens["attention_mask"].squeeze(0),
+            "label": label,
+            "task_id": task_id,
+        }
+
+    def _tokenize_instruction(self, messages: list[dict], record: dict) -> dict:
+        """Tokenize instruction pairs with loss masking for assistant tokens only."""
+        task_id = record.get("task_id")
+        label = record.get(self.label_field, record.get("text_context", ""))
+
+        # Tokenize prompt (system + user) with generation prompt
+        # add_generation_prompt=True adds "<|im_start|>assistant\n" at the end
+        prompt_messages = [m for m in messages if m["role"] != "assistant"]
+        prompt_enc = self.tokenizer.apply_chat_template(
+            prompt_messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
+        )
+        prompt_ids = prompt_enc["input_ids"].squeeze(0)  # BatchEncoding has input_ids
+
+        # Reserve at least 256 tokens for the response
+        max_prompt_len = max(64, self.max_seq_length - 512)
+        if prompt_ids.size(0) > max_prompt_len:
+            prompt_ids = prompt_ids[:max_prompt_len]
+
+        prompt_len = prompt_ids.size(0)
+
+        # Tokenize assistant content separately (encode returns torch.Tensor)
+        assistant_content = messages[-1]["content"]
+        assistant_ids = self.tokenizer.encode(
+            assistant_content,
+            add_special_tokens=False,
+            return_tensors="pt",
+        ).squeeze(0)
+
+        # Build full input: prompt + assistant response
+        full_ids = torch.cat([prompt_ids, assistant_ids], dim=0)
+        attention_mask = torch.ones(full_ids.size(0), dtype=torch.long)
+
+        # Pad or truncate to max_seq_length
+        if full_ids.size(0) < self.max_seq_length:
+            pad_len = self.max_seq_length - full_ids.size(0)
+            full_ids = torch.cat([
+                full_ids,
+                torch.full((pad_len,), self.tokenizer.pad_token_id or self.tokenizer.eos_token_id),
+            ])
+            attention_mask = torch.cat([
+                attention_mask,
+                torch.zeros(pad_len, dtype=torch.long),
+            ])
+        else:
+            full_ids = full_ids[:self.max_seq_length]
+            attention_mask = attention_mask[:self.max_seq_length]
+
+        # Label mask: -100 for prompt tokens, valid token IDs for assistant
+        token_labels = full_ids.clone()
+        actual_assistant_len = min(assistant_ids.size(0), self.max_seq_length - prompt_len)
+        token_labels[:prompt_len] = -100
+        if prompt_len + actual_assistant_len < self.max_seq_length:
+            token_labels[prompt_len + actual_assistant_len:] = -100
+
+        return {
+            "input_ids": full_ids,
+            "attention_mask": attention_mask,
+            "token_labels": token_labels,
             "label": label,
             "task_id": task_id,
         }
@@ -138,11 +218,20 @@ def interleaved_collate(batch: list[dict]) -> dict:
     input_ids = torch.stack([item["input_ids"] for item in interleaved])
     attention_mask = torch.stack([item["attention_mask"] for item in interleaved])
 
-    return {
+    result = {
         "input_ids": input_ids,
         "attention_mask": attention_mask,
         "labels": [item["label"] for item in interleaved],
     }
+
+    # Carry token_labels if present (instruction format)
+    if any("token_labels" in item for item in interleaved):
+        result["token_labels"] = torch.stack([
+            item.get("token_labels", item["input_ids"])
+            for item in interleaved
+        ])
+
+    return result
 
 
 class OnPremTrainer:
@@ -225,11 +314,30 @@ class OnPremTrainer:
                     attention_mask=attention_mask,
                 ).logits
 
-                labels = input_ids[:, 1:]
-                logits = logits[:, :-1, :]
-                mask = attention_mask[:, 1:]
-
-                loss = self.loss_fn(logits.reshape(-1, logits.size(-1)), labels.reshape(-1), mask.reshape(-1))
+                # Use token_labels for instruction format, fall back to input shift
+                if "token_labels" in batch:
+                    labels = batch["token_labels"].to(self.device)[:, 1:]
+                    logits_shifted = logits[:, :-1, :]
+                    mask_shifted = attention_mask[:, 1:]
+                    # Filter out -100 (ignored) positions
+                    valid = (labels != -100)
+                    if valid.any():
+                        loss = self.loss_fn(
+                            logits_shifted[valid],
+                            labels[valid],
+                            mask_shifted[valid],
+                        )
+                    else:
+                        loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+                else:
+                    labels = input_ids[:, 1:]
+                    logits_shifted = logits[:, :-1, :]
+                    mask_shifted = attention_mask[:, 1:]
+                    loss = self.loss_fn(
+                        logits_shifted.reshape(-1, logits_shifted.size(-1)),
+                        labels.reshape(-1),
+                        mask_shifted.reshape(-1),
+                    )
                 loss = loss / self.gradient_accumulation_steps
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
