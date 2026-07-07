@@ -10,6 +10,10 @@ pip install -e ".[embeddings,dev]"
 cp .env.example .env   # then edit .env with your DEEPSEEK_API_KEY
 ```
 
+## Kaggle Notebook (T4 GPU)
+
+Open `notebooks/kaggle_train.ipynb` in Kaggle — it clones this repo, generates data, trains a Qwen2.5-7B QLoRA adapter, and saves the weights. Total runtime ~15-25 min.
+
 ## Generate synthetic NIST data
 
 Requires `DEEPSEEK_API_KEY` in your environment.
