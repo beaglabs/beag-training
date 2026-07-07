@@ -30,9 +30,9 @@ class UnslothAdapter:
     """
 
     MODEL_MAP = {
-        "starter": "Qwen/Qwen3.5-4B",
+        "starter": "Qwen/Qwen2.5-3B-Instruct",
         "standard": "Qwen/Qwen2.5-7B-Instruct",
-        "performance": "Qwen/Qwen3.5-35B-A3B",
+        "performance": "Qwen/Qwen2.5-32B-Instruct",
     }
 
     def __init__(
