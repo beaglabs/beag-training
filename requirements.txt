@@ -5,6 +5,7 @@ openai>=1.0.0
 pydantic-settings>=2.0.0
 python-dotenv>=1.0.0
 pyyaml>=6.0
+scikit-learn>=1.3.0
 
 # GPU Training (requires CUDA toolkit)
 torch>=2.4.0
@@ -17,3 +18,6 @@ xformers
 optimum[onnxruntime]
 onnxruntime
 transformers
+
+# Embeddings (optional, install with [embeddings] extra)
+# sentence-transformers>=3.0.0

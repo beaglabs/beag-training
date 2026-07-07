@@ -59,6 +59,8 @@ class DeepSeekClient:
         self.client = AsyncOpenAI(
             base_url="https://api.deepseek.com",
             api_key=api_key or settings.deepseek_api_key,
+            timeout=60.0,
+            max_retries=2,
         )
 
     async def label_example(

@@ -10,6 +10,7 @@ dependencies = [
     "pydantic-settings>=2.0.0",
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0",
+    "scikit-learn>=1.3.0",
     "torch>=2.4.0",
     "unsloth",
     "accelerate",
@@ -20,12 +21,18 @@ dependencies = [
     "transformers",
 ]
 
+[project.scripts]
+beag-catalog = "frameworks.catalog_cli:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
     "ruff>=0.6.0",
     "mypy>=1.11.0",
+]
+embeddings = [
+    "sentence-transformers>=3.0.0",
 ]
 
 [build-system]

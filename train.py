@@ -3,15 +3,23 @@
 Beag Model Training — single-command training recipe.
 
 Workflow:
-  1. Ingest CSV/Parquet → labeled examples (optional DeepSeek cold-start)
+  0. Generate synthetic data via DeepSeek (optional, --generate)
+  1. Ingest CSV/Parquet/JSONL → labeled examples (optional DeepSeek cold-start)
   2. Train with Unsloth QLoRA + CISPO loss
   3. OPD recovery (optional)
   4. ONNX export with validation
 
 Usage:
+  # Generate synthetic NIST compliance data
+  python train.py --generate --nist 1000 --output ./output
+
+  # Train on existing data
   python train.py --data input.csv --labels "bug,clean,anti-pattern" --tier standard
-  python train.py --data input.parquet --task extraction --tier performance --no-label  # skip DeepSeek
+  python train.py --data input.parquet --task extraction --tier performance --no-label
   python train.py --data labeled.jsonl --no-label --export
+
+  # Full pipeline: generate -> train -> export
+  python train.py --generate --nist 500 --labels "" --tier standard --export
 """
 
 from __future__ import annotations
@@ -33,8 +41,10 @@ from onprem.export import merge_and_export
 
 def main():
     parser = argparse.ArgumentParser(description="Beag Model Training")
-    parser.add_argument("--data", required=True, help="CSV, Parquet, or JSONL file")
-    parser.add_argument("--task", default="classification", choices=["classification", "extraction", "code", "custom"])
+    parser.add_argument("--data", default="", help="CSV, Parquet, or JSONL file")
+    parser.add_argument("--generate", action="store_true", help="Generate synthetic NIST data before training")
+    parser.add_argument("--nist", type=int, default=500, help="Number of synthetic NIST examples to generate")
+    parser.add_argument("--task", default="classification", choices=["classification", "extraction", "code", "custom", "nist"])
     parser.add_argument("--labels", default="", help="Comma-separated label set (e.g. 'bug,clean')")
     parser.add_argument("--tier", default="standard", choices=["starter", "standard", "performance"])
     parser.add_argument("--description", default="", help="Task description for the labeler")
@@ -55,60 +65,114 @@ def main():
     label_list = [l.strip() for l in args.labels.split(",") if l.strip()] if args.labels else []
     task_type = args.task
 
-    # ─── Step 1: Ingest ────────────────────────────────────────────────
-    print(f"\n{'='*60}")
-    print(f"[1/5] Loading data from {args.data}...")
-
-    data_path = Path(args.data)
-    fmt = detect_format(data_path.name)
-    raw = data_path.read_bytes()
-    table = normalize(raw, fmt)
-    examples = table_to_examples(table)
-
-    print(f"  Format: {fmt}")
-    print(f"  Examples: {len(examples)}")
-    print(f"  Columns: {table.column_names}")
-
-    # ─── Step 2: DeepSeek Labeling ──────────────────────────────────────
-    if not args.skip_label and label_list:
+    # ─── Step 0: Generate synthetic NIST data ─────────────────────────
+    if args.generate:
         print(f"\n{'='*60}")
-        print(f"[2/5] Frontier labeling via DeepSeek...")
-        print(f"  Task: {task_type}")
-        print(f"  Labels: {label_list}")
-        print(f"  Concurrency: 10")
+        print(f"[0/5] Generating synthetic NIST compliance data...")
+        print(f"  Target examples: {args.nist}")
 
-        task_def = TaskDefinition(
-            type=task_type,
-            labels=label_list,
-            description=args.description,
+        from data import DataGenerator, GeneratorConfig
+        from data.validator import filter_valid
+        from frameworks.catalog import Framework, load_catalog
+
+        cat = load_catalog()
+        config = GeneratorConfig(
+            total_examples=args.nist,
+            frameworks=list(Framework),
+            concurrency=10,
         )
+        gen = DataGenerator(catalog=cat, config=config)
+        examples = gen.generate_all()
+        examples, invalid = filter_valid(examples, cat)
+        print(f"  Valid: {len(examples)}  Invalid: {len(invalid)}")
 
-        client = DeepSeekClient()
+        gen.save(examples, output_dir / "generated.jsonl")
 
-        async def run_label():
-            return await client.batch_label(examples=examples, task=task_def)
+        from data.augment import DataAugmenter
 
-        labeled = asyncio.run(run_label())
-        examples = labeled
+        augmenter = DataAugmenter(cat)
+        augmented: list = []
+        for ex in examples[: max(1, len(examples) // 5)]:
+            augmented.extend(augmenter.augment(ex))
+        aug_valid, aug_invalid = filter_valid(augmented, cat)
+        print(f"  Augmented: {len(aug_valid)} valid, {len(aug_invalid)} invalid")
 
-        total_cost = sum(e.get("labeling_cost", 0) for e in labeled)
-        total_tokens = sum(e.get("labeling_tokens", 0) for e in labeled)
-        print(f"  Done. Tokens: {total_tokens:,}  Cost: ${total_cost:.2f}")
+        all_examples = examples + aug_valid
+        labeled_path = output_dir / "generated_augmented.jsonl"
+        with open(labeled_path, "w") as f:
+            for ex in all_examples:
+                record = {
+                    "text": json.dumps(ex.input_json),
+                    "mappings": [m.to_dict() for m in ex.mappings],
+                    "text_context": ex.text_context,
+                }
+                f.write(json.dumps(record) + "\n")
+        print(f"  Saved: {labeled_path} ({len(all_examples)} examples)")
+
+        skip_to_train = True
+    else:
+        if not args.data:
+            print("Error: --data is required when not using --generate")
+            sys.exit(1)
+        labeled_path = output_dir / "labeled.jsonl"
+        skip_to_train = False
+
+    # ─── Step 1: Ingest ────────────────────────────────────────────────
+    if not skip_to_train:
+        print(f"\n{'='*60}")
+        print(f"[1/5] Loading data from {args.data}...")
+
+        data_path = Path(args.data)
+        fmt = detect_format(data_path.name)
+        raw = data_path.read_bytes()
+        table = normalize(raw, fmt)
+        examples = table_to_examples(table)
+
+        print(f"  Format: {fmt}")
+        print(f"  Examples: {len(examples)}")
+        print(f"  Columns: {table.column_names}")
+
+        # ─── Step 2: DeepSeek Labeling ──────────────────────────────
+        if not args.skip_label and label_list:
+            print(f"\n{'='*60}")
+            print(f"[2/5] Frontier labeling via DeepSeek...")
+            print(f"  Task: {task_type}")
+            print(f"  Labels: {label_list}")
+            print(f"  Concurrency: 10")
+
+            task_def = TaskDefinition(
+                type=task_type,
+                labels=label_list,
+                description=args.description,
+            )
+
+            client = DeepSeekClient()
+
+            async def run_label():
+                return await client.batch_label(examples=examples, task=task_def)
+
+            labeled = asyncio.run(run_label())
+            examples = labeled
+
+            total_cost = sum(e.get("labeling_cost", 0) for e in labeled)
+            total_tokens = sum(e.get("labeling_tokens", 0) for e in labeled)
+            print(f"  Done. Tokens: {total_tokens:,}  Cost: ${total_cost:.2f}")
+        else:
+            print(f"\n{'='*60}")
+            print(f"[2/5] Skipping frontier labeling (--no-label or no labels specified)")
+
+        with open(labeled_path, "w") as f:
+            for ex in examples:
+                record = {
+                    "text": ex.get("input_data", {}).get("text", str(ex.get("input_data", {}))),
+                    "frontier_label": ex.get("frontier_label", ex.get("original_label", "")),
+                    "original_label": ex.get("original_label"),
+                }
+                f.write(json.dumps(record) + "\n")
+        print(f"  Saved: {labeled_path}")
     else:
         print(f"\n{'='*60}")
-        print(f"[2/5] Skipping frontier labeling (--no-label or no labels specified)")
-
-    # Save labeled examples as JSONL
-    labeled_path = output_dir / "labeled.jsonl"
-    with open(labeled_path, "w") as f:
-        for ex in examples:
-            record = {
-                "text": ex.get("input_data", {}).get("text", str(ex.get("input_data", {}))),
-                "frontier_label": ex.get("frontier_label", ex.get("original_label", "")),
-                "original_label": ex.get("original_label"),
-            }
-            f.write(json.dumps(record) + "\n")
-    print(f"  Saved: {labeled_path}")
+        print(f"[1/5][2/5] Skipping ingest & labeling (generated data ready)")
 
     # ─── Step 3: Train ─────────────────────────────────────────────────
     print(f"\n{'='*60}")
@@ -130,17 +194,39 @@ def main():
     if not records:
         print("  No training records found. Skipping training.")
     else:
-        trainer = OnPremTrainer(model, tokenizer, config={
-            "batch_size": args.batch_size,
-            "num_epochs": args.epochs,
-            "max_seq_length": args.max_seq_length,
-            "output_dir": str(output_dir / "checkpoints"),
-        })
+        # Check if data has NIST-style mappings (multi-label)
+        has_mappings = any("mappings" in r for r in records)
+
+        if has_mappings and args.task == "nist":
+            print(f"  Multi-label NIST training: {len(records)} examples")
+            from frameworks.catalog import load_catalog
+            nist_cat = load_catalog()
+            trainer_config = {
+                "batch_size": args.batch_size,
+                "num_epochs": args.epochs,
+                "max_seq_length": args.max_seq_length,
+                "output_dir": str(output_dir / "checkpoints"),
+                "task_type": "nist_multi_label",
+                "catalog": nist_cat,
+            }
+        else:
+            trainer_config = {
+                "batch_size": args.batch_size,
+                "num_epochs": args.epochs,
+                "max_seq_length": args.max_seq_length,
+                "output_dir": str(output_dir / "checkpoints"),
+            }
+
+        trainer = OnPremTrainer(model, tokenizer, config=trainer_config)
         train_result = trainer.train(records)
 
         print(f"  Steps: {train_result['total_steps']}")
-        print(f"  Final loss: {train_result['final_loss']:.4f}")
-        print(f"  Best loss: {train_result['best_loss']:.4f}")
+        final_loss = train_result.get("final_loss")
+        best_loss = train_result.get("best_loss")
+        if final_loss is not None:
+            print(f"  Final loss: {final_loss:.4f}")
+        if best_loss is not None:
+            print(f"  Best loss: {best_loss:.4f}")
 
         adapter.save(str(output_dir / "checkpoints" / "trained"))
 
