@@ -1,0 +1,43 @@
+# Beag On-Prem Training Configuration
+# ──────────────────────────────────────────────
+
+customer:
+  id: "cust-001"
+  model_tier: "standard"    # starter | standard | performance
+
+training:
+  dataset_path: "/data/training.jsonl"
+  text_field: "text"
+  label_field: "corrected_label"
+  lora_rank: 32
+  lora_alpha: 16
+  max_seq_length: 32768
+  learning_rate: 2.0e-5
+  batch_size: 4
+  gradient_accumulation: 4
+  num_epochs: 3
+  warmup_steps: 50
+  save_every: 100
+  use_interleaved_batching: true
+
+  cispo_clip_low: 0.2
+  cispo_clip_high: 0.8
+  cispo_beta: 0.1
+
+opd:
+  enabled: true
+  prompts_path: "/data/opd-prompts.jsonl"
+  steps: 50
+  batch_size: 2
+  max_tokens: 512
+  learning_rate: 5.0e-6
+  promote_every: 10
+  temperature: 0.7
+
+export:
+  format: "onnx"
+  output_dir: "/exports"
+  validate: true
+
+checkpoints:
+  output_dir: "/checkpoints"

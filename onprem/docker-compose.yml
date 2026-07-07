@@ -1,0 +1,23 @@
+version: "3.9"
+
+services:
+  training:
+    build:
+      context: ..
+      dockerfile: onprem/Dockerfile
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0
+    volumes:
+      - ./config.yaml:/app/onprem/config.yaml:ro
+      - ./data:/data:ro
+      - ./exports:/exports
+      - ./checkpoints:/checkpoints
+    command: python /app/onprem/run.py --config /app/onprem/config.yaml
