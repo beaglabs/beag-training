@@ -95,14 +95,15 @@ class CISPOLoss(torch.nn.Module):
         attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         probs = F.softmax(logits, dim=-1)
+        probs = torch.clamp(probs, min=1e-9, max=1.0 - 1e-9)
         target_probs = probs.gather(-1, labels.unsqueeze(-1)).squeeze(-1)
 
         clipped_probs = torch.clamp(target_probs, self.clip_low, self.clip_high)
-        nll = -torch.log(clipped_probs + 1e-12)
+        nll = -torch.log(clipped_probs)
 
         mask = (target_probs > self.clip_low).float()
 
-        entropy = -(probs * torch.log(probs + 1e-12)).sum(-1)
+        entropy = -(probs * torch.log(probs)).sum(-1)
         entropy_bonus = self.beta * entropy
 
         loss = nll * mask - entropy_bonus
@@ -223,11 +224,23 @@ class OnPremTrainer:
                     attention_mask=attention_mask,
                 ).logits
 
+                if torch.isnan(logits).any():
+                    print(f"  WARNING: NaN in logits at batch {batch_idx}! Model output is NaN.", flush=True)
+                    print(f"    logits min={logits.min():.4f} max={logits.max():.4f}", flush=True)
+                    print(f"    input_ids min={input_ids.min()} max={input_ids.max()}", flush=True)
+                    print(f"    attention_mask sum={attention_mask.sum()}", flush=True)
+
                 labels = input_ids[:, 1:]
                 logits = logits[:, :-1, :]
                 mask = attention_mask[:, 1:]
 
                 loss = self.loss_fn(logits.reshape(-1, logits.size(-1)), labels.reshape(-1), mask.reshape(-1))
+
+                if torch.isnan(loss):
+                    print(f"  WARNING: NaN loss at batch {batch_idx}! Skipping step.", flush=True)
+                    if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
+                        self.optimizer.zero_grad()
+                    continue
                 loss = loss / self.gradient_accumulation_steps
                 loss.backward()
 
