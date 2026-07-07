@@ -212,6 +212,7 @@ class OnPremTrainer:
         for epoch in range(self.num_epochs):
             self.model.train()
             epoch_loss = 0.0
+            print(f"Epoch {epoch + 1}/{self.num_epochs} ({len(loader)} batches)...", flush=True)
 
             for batch_idx, batch in enumerate(loader):
                 input_ids = batch["input_ids"].to(self.device)
@@ -242,6 +243,9 @@ class OnPremTrainer:
                 history["lr"].append(self.optimizer.param_groups[0]["lr"])
                 history["step"].append(self.global_step)
 
+                if batch_idx % 10 == 0 or batch_idx == len(loader) - 1:
+                    print(f"  batch {batch_idx}/{len(loader)} | loss {loss.item()*self.gradient_accumulation_steps:.4f} | step {self.global_step}/{total_steps}", flush=True)
+
                 if self.global_step % self.save_every == 0 and self.global_step > 0:
                     self._save_checkpoint()
 
@@ -249,6 +253,7 @@ class OnPremTrainer:
                     break
 
             avg_loss = epoch_loss / max(len(loader), 1)
+            print(f"  epoch {epoch + 1} avg loss: {avg_loss:.4f}", flush=True)
             if avg_loss < self.best_loss:
                 self.best_loss = avg_loss
                 self._save_checkpoint("best")
