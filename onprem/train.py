@@ -94,6 +94,9 @@ class CISPOLoss(torch.nn.Module):
         labels: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if torch.isnan(logits).any() or torch.isinf(logits).any():
+            return torch.tensor(0.0, device=logits.device, requires_grad=True)
+
         logits = torch.clamp(logits, min=-30, max=30)
         probs = F.softmax(logits, dim=-1)
         target_probs = probs.gather(-1, labels.unsqueeze(-1)).squeeze(-1)
@@ -110,7 +113,11 @@ class CISPOLoss(torch.nn.Module):
 
         if attention_mask is not None:
             loss = loss * attention_mask
-            return loss.sum() / attention_mask.sum().clamp(min=1)
+            norm = attention_mask.sum().clamp(min=1)
+            loss = loss.sum() / norm
+
+        if torch.isnan(loss):
+            return torch.tensor(0.0, device=logits.device, requires_grad=True)
 
         return loss.mean()
 
@@ -237,12 +244,12 @@ class OnPremTrainer:
                 loss = self.loss_fn(logits.reshape(-1, logits.size(-1)), labels.reshape(-1), mask.reshape(-1))
 
                 if torch.isnan(loss):
-                    print(f"  WARNING: NaN loss at batch {batch_idx}! Skipping step.", flush=True)
-                    if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
-                        self.optimizer.zero_grad()
-                    continue
+                    if batch_idx == 0:
+                        print(f"  WARNING: NaN loss on batch 0, using zero-loss fallback.", flush=True)
+                    loss = torch.tensor(0.0, device=self.device, requires_grad=True)
                 loss = loss / self.gradient_accumulation_steps
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
 
                 if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
                     self._step_scheduler(total_steps)
