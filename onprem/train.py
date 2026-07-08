@@ -277,8 +277,7 @@ class OnPremTrainer:
         self.output_dir = config.get("output_dir", "output")
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        if next(self.model.parameters()).device != self.device:
-            self.model.to(self.device)
+        # Unsloth already puts the model on the correct device
 
         self.global_step = 0
         self.best_loss = float("inf")
