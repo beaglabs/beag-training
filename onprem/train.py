@@ -250,10 +250,12 @@ class OnPremTrainer:
         model,
         tokenizer,
         config: dict,
+        teacher_model=None,
     ):
         self.model = model
         self.tokenizer = tokenizer
         self.config = config
+        self.teacher_model = teacher_model
 
         self.loss_fn = CISPOLoss(
             clip_low=config.get("cispo_clip_low", 0.2),
@@ -275,12 +277,27 @@ class OnPremTrainer:
         self.warmup_steps = config.get("warmup_steps", 50)
         self.save_every = config.get("save_every", 100)
         self.output_dir = config.get("output_dir", "output")
+        self.distill_every = config.get("distill_every", 0)
+        self.kl_lambda = config.get("kl_lambda", 0.05)
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # Unsloth already puts the model on the correct device
 
         self.global_step = 0
         self.best_loss = float("inf")
+
+    def _compute_distill_kl(
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor, student_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        """Reverse KL: KL(student || teacher) — keeps student grounded in base model."""
+        with torch.no_grad():
+            teacher_logits = self.teacher_model(
+                input_ids=input_ids, attention_mask=attention_mask,
+            ).logits
+        student_logp = F.log_softmax(student_logits.float(), dim=-1)
+        teacher_logp = F.log_softmax(teacher_logits.float(), dim=-1)
+        kl = (student_logp.exp() * (student_logp - teacher_logp)).sum(-1).mean()
+        return kl
 
     def train(self, records: list[dict]) -> dict:
         """Run the full training loop. Returns training summary."""
@@ -345,6 +362,10 @@ class OnPremTrainer:
                         labels.reshape(-1),
                         mask_shifted.reshape(-1),
                     )
+                # Self-distillation: reverse KL penalty keeps student grounded in base model
+                if self.teacher_model is not None and self.distill_every > 0 and batch_idx % self.distill_every == 0:
+                    kl = self._compute_distill_kl(input_ids, attention_mask, logits)
+                    loss = loss + self.kl_lambda * kl
                 loss = loss / self.gradient_accumulation_steps
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
