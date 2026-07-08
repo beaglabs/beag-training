@@ -290,10 +290,12 @@ class OnPremTrainer:
         self, input_ids: torch.Tensor, attention_mask: torch.Tensor, student_logits: torch.Tensor,
     ) -> torch.Tensor:
         """Reverse KL: KL(student || teacher) — keeps student grounded in base model."""
+        teacher_device = next(self.teacher_model.parameters()).device
         with torch.no_grad():
             teacher_logits = self.teacher_model(
-                input_ids=input_ids, attention_mask=attention_mask,
-            ).logits
+                input_ids=input_ids.to(teacher_device),
+                attention_mask=attention_mask.to(teacher_device),
+            ).logits.to(self.device)
         student_logp = F.log_softmax(student_logits.float(), dim=-1)
         teacher_logp = F.log_softmax(teacher_logits.float(), dim=-1)
         kl = (student_logp.exp() * (student_logp - teacher_logp)).sum(-1).mean()
