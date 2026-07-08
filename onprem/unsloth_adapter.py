@@ -42,6 +42,7 @@ class UnslothAdapter:
         load_in_4bit: bool = True,
         lora_rank: int = 32,
         lora_alpha: int = 16,
+        device_map = None,
     ):
         if not UNSLOTH_AVAILABLE:
             raise ImportError(
@@ -55,18 +56,22 @@ class UnslothAdapter:
         self.load_in_4bit = load_in_4bit
         self.lora_rank = lora_rank
         self.lora_alpha = lora_alpha
+        self.device_map = device_map
 
         self.model = None
         self.tokenizer = None
 
     def load(self) -> Tuple:
         """Load base model and tokenizer with QLoRA applied."""
-        self.model, self.tokenizer = FastLanguageModel.from_pretrained(
-            model_name=self.model_id,
-            max_seq_length=self.max_seq_length,
-            dtype=None,
-            load_in_4bit=self.load_in_4bit,
-        )
+        load_kwargs = {
+            "model_name": self.model_id,
+            "max_seq_length": self.max_seq_length,
+            "dtype": None,
+            "load_in_4bit": self.load_in_4bit,
+        }
+        if self.device_map is not None:
+            load_kwargs["device_map"] = self.device_map
+        self.model, self.tokenizer = FastLanguageModel.from_pretrained(**load_kwargs)
 
         self.model = FastLanguageModel.get_peft_model(
             self.model,
