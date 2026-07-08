@@ -87,7 +87,6 @@ class LabeledDataset(Dataset):
         label = record.get(self.label_field, record.get("text_context", ""))
 
         # Tokenize prompt (system + user) with generation prompt
-        # add_generation_prompt=True adds "<|im_start|>assistant\n" at the end
         prompt_messages = [m for m in messages if m["role"] != "assistant"]
         prompt_enc = self.tokenizer.apply_chat_template(
             prompt_messages,
@@ -95,7 +94,14 @@ class LabeledDataset(Dataset):
             add_generation_prompt=True,
             return_tensors="pt",
         )
-        prompt_ids = prompt_enc["input_ids"].squeeze(0)  # BatchEncoding has input_ids
+        if hasattr(prompt_enc, "input_ids"):
+            prompt_ids_pt = prompt_enc["input_ids"]
+        else:
+            prompt_ids_pt = prompt_enc
+        prompt_ids = prompt_ids_pt.squeeze(0)
+        # Handle multi-squeeze edge case on older transformers versions
+        if prompt_ids.dim() > 1:
+            prompt_ids = prompt_ids.squeeze(0)
 
         # Reserve at least 256 tokens for the response
         max_prompt_len = max(64, self.max_seq_length - 512)
@@ -104,13 +110,15 @@ class LabeledDataset(Dataset):
 
         prompt_len = prompt_ids.size(0)
 
-        # Tokenize assistant content separately (encode returns torch.Tensor)
+        # Tokenize assistant content separately
         assistant_content = messages[-1]["content"]
         assistant_ids = self.tokenizer.encode(
             assistant_content,
             add_special_tokens=False,
             return_tensors="pt",
         ).squeeze(0)
+        if assistant_ids.dim() > 1:
+            assistant_ids = assistant_ids.squeeze(0)
 
         # Build full input: prompt + assistant response
         full_ids = torch.cat([prompt_ids, assistant_ids], dim=0)
