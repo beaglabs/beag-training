@@ -306,7 +306,7 @@ class OnPremTrainer:
             self.tokenizer,
             text_field=self.config.get("text_field", "text"),
             label_field=self.config.get("label_field", "corrected_label"),
-            max_seq_length=self.config.get("max_seq_length", 32768),
+            max_seq_length=self.config.get("max_seq_length") or self.model.config.max_position_embeddings,
         )
 
         collate_fn = interleaved_collate if self.use_interleaved else None
@@ -337,6 +337,13 @@ class OnPremTrainer:
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                 ).logits
+
+                seq_len = logits.size(1)
+                if input_ids.size(1) > seq_len:
+                    input_ids = input_ids[:, :seq_len]
+                    attention_mask = attention_mask[:, :seq_len]
+                    if "token_labels" in batch:
+                        batch["token_labels"] = batch["token_labels"][:, :seq_len]
 
                 # Use token_labels for instruction format, fall back to input shift
                 if "token_labels" in batch:
